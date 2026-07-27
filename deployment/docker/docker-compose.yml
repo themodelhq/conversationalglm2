@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  # Main GLM Platform Application
+  glm-platform:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+    container_name: glm-platform
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=file:./data/custom.db
+      - NEXT_PUBLIC_API_URL=http://localhost:3000/api
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/public/uploads
+      - ./exports:/app/public/exports
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - glm-network
+
+  # Redis for caching and session management
+  redis:
+    image: redis:7-alpine
+    container_name: glm-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    networks:
+      - glm-network
+
+  # Training Service (GPU-enabled)
+  training-service:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.training
+    container_name: glm-training
+    ports:
+      - "8000:8000"
+    environment:
+      - CUDA_VISIBLE_DEVICES=0,1,2,3
+      - NCCL_DEBUG=WARN
+    volumes:
+      - ./checkpoints:/app/checkpoints
+      - ./datasets:/app/datasets
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 4
+              capabilities: [gpu]
+    restart: unless-stopped
+    profiles:
+      - training
+    networks:
+      - glm-network
+
+  # WebSocket Service for real-time features
+  websocket-service:
+    image: node:20-alpine
+    container_name: glm-websocket
+    working_dir: /app
+    command: ["node", "mini-services/chat-service/index.ts"]
+    volumes:
+      - ../../mini-services:/app
+    ports:
+      - "3003:3003"
+    depends_on:
+      - glm-platform
+    restart: unless-stopped
+    networks:
+      - glm-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: glm-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - glm-platform
+    restart: unless-stopped
+    networks:
+      - glm-network
+
+volumes:
+  redis-data:
+
+networks:
+  glm-network:
+    driver: bridge
